@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-pptx
+python-docx
+pymupdf
+requests
+moviepy
+gtts
+pillow
