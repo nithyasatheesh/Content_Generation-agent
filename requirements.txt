@@ -7,3 +7,6 @@ requests
 moviepy
 gtts
 pillow
+
+streamlit
+openai
