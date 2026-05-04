@@ -1,158 +1,184 @@
 import os
-from fastapi import FastAPI, UploadFile, File
-from pptx import Presentation
-from pptx.util import Inches
-from docx import Document
+from dataclasses import dataclass
+from typing import Callable, Dict, Optional
+
 import fitz  # PyMuPDF
 import openai
+from docx import Document
+from fastapi import FastAPI, File, UploadFile
+from pptx import Presentation
 
 app = FastAPI()
-
 openai.api_key = "YOUR_API_KEY"
 
-# -------------------------------
-# 1. FILE TYPE DETECTION
-# -------------------------------
-def detect_file_type(filename):
-    if filename.endswith(".pdf"):
-        return "pdf"
-    elif filename.endswith(".docx"):
-        return "docx"
-    elif filename.endswith(".txt"):
-        return "txt"
-    elif filename.endswith(".pptx"):
-        return "pptx"
-    else:
-        return None
 
-# -------------------------------
-# 2. PARSERS
-# -------------------------------
-def parse_pdf(path):
-    doc = fitz.open(path)
-    text = ""
-    for page in doc:
-        text += page.get_text()
-    return text
+@dataclass
+class GeneratedArtifacts:
+    structured_content: str
+    quiz_content: str
+    slide_path: str
+    video_path: Optional[str] = None
 
-def parse_docx(path):
-    doc = Document(path)
-    return "\n".join([p.text for p in doc.paragraphs])
 
-def parse_txt(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+class ParserAgent:
+    def detect_file_type(self, filename: str) -> Optional[str]:
+        extension = os.path.splitext(filename)[1].lower()
+        return {
+            ".pdf": "pdf",
+            ".docx": "docx",
+            ".txt": "txt",
+            ".pptx": "pptx",
+        }.get(extension)
 
-def parse_pptx(path):
-    prs = Presentation(path)
-    text = ""
-    for slide in prs.slides:
-        for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                text += shape.text + "\n"
-    return text
+    def parse(self, file_type: str, path: str) -> str:
+        parsers: Dict[str, Callable[[str], str]] = {
+            "pdf": self._parse_pdf,
+            "docx": self._parse_docx,
+            "txt": self._parse_txt,
+            "pptx": self._parse_pptx,
+        }
+        parser = parsers.get(file_type)
+        if not parser:
+            raise ValueError(f"Unsupported file type: {file_type}")
+        return parser(path)
 
-# -------------------------------
-# 3. STRUCTURE CONTENT (LLM)
-# -------------------------------
-def structure_content(text):
-    prompt = f"""
-    Convert the following content into teaching slides.
+    def _parse_pdf(self, path: str) -> str:
+        doc = fitz.open(path)
+        return "".join(page.get_text() for page in doc)
 
-    Rules:
-    - Max 5 bullet points per slide
-    - Each point under 12 words
-    - Keep it simple and structured
+    def _parse_docx(self, path: str) -> str:
+        doc = Document(path)
+        return "\n".join(p.text for p in doc.paragraphs)
 
-    Content:
-    {text[:4000]}
-    """
+    def _parse_txt(self, path: str) -> str:
+        with open(path, "r", encoding="utf-8") as file:
+            return file.read()
 
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
-    )
+    def _parse_pptx(self, path: str) -> str:
+        prs = Presentation(path)
+        text_blocks = []
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text:
+                    text_blocks.append(shape.text)
+        return "\n".join(text_blocks)
 
-    return response.choices[0].message.content
 
-# -------------------------------
-# 4. GENERATE QUIZ
-# -------------------------------
-def generate_quiz(text):
-    prompt = f"""
-    Create a quiz:
-    - 5 MCQs
-    - Include answers
+class ContentStructuringAgent:
+    def structure(self, text: str) -> str:
+        prompt = f"""
+        Convert the following content into teaching slides.
 
-    Content:
-    {text[:2000]}
-    """
+        Rules:
+        - Max 5 bullet points per slide
+        - Each point under 12 words
+        - Keep it simple and structured
 
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
-    )
+        Content:
+        {text[:4000]}
+        """
 
-    return response.choices[0].message.content
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.choices[0].message.content
 
-# -------------------------------
-# 5. CREATE PPT
-# -------------------------------
-def create_ppt(structured_text, quiz_text):
-    prs = Presentation()
 
-    slides = structured_text.split("\n\n")
+class QuizGeneratorAgent:
+    def generate(self, text: str) -> str:
+        prompt = f"""
+        Create a quiz:
+        - 5 MCQs
+        - Include answers
 
-    for slide_text in slides:
-        slide_layout = prs.slide_layouts[1]
-        slide = prs.slides.add_slide(slide_layout)
+        Content:
+        {text[:2000]}
+        """
 
-        lines = slide_text.split("\n")
-        if len(lines) > 0:
-            slide.shapes.title.text = lines[0]
-            slide.placeholders[1].text = "\n".join(lines[1:])
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.choices[0].message.content
 
-    # Add quiz slide
-    slide_layout = prs.slide_layouts[1]
-    slide = prs.slides.add_slide(slide_layout)
-    slide.shapes.title.text = "Quiz"
-    slide.placeholders[1].text = quiz_text
 
-    output_path = "output.pptx"
-    prs.save(output_path)
+class SlideGeneratorAgent:
+    def generate(self, structured_text: str, quiz_text: str) -> str:
+        prs = Presentation()
+        slides = [block for block in structured_text.split("\n\n") if block.strip()]
 
-    return output_path
+        for slide_text in slides:
+            slide = prs.slides.add_slide(prs.slide_layouts[1])
+            lines = [line for line in slide_text.split("\n") if line.strip()]
 
-# -------------------------------
-# 6. MAIN API
-# -------------------------------
+            if lines:
+                slide.shapes.title.text = lines[0]
+                slide.placeholders[1].text = "\n".join(lines[1:])
+
+        quiz_slide = prs.slides.add_slide(prs.slide_layouts[1])
+        quiz_slide.shapes.title.text = "Quiz"
+        quiz_slide.placeholders[1].text = quiz_text
+
+        output_path = "output.pptx"
+        prs.save(output_path)
+        return output_path
+
+
+class VideoGeneratorAgent:
+    def generate(self, structured_text: str) -> str:
+        output_path = "output_video.txt"
+        with open(output_path, "w", encoding="utf-8") as file:
+            file.write("Video generation placeholder\n")
+            file.write("Input summary:\n")
+            file.write(structured_text[:500])
+        return output_path
+
+
+class ContentGenerationOrchestrator:
+    def __init__(self) -> None:
+        self.parser_agent = ParserAgent()
+        self.structuring_agent = ContentStructuringAgent()
+        self.slide_agent = SlideGeneratorAgent()
+        self.quiz_agent = QuizGeneratorAgent()
+        self.video_agent = VideoGeneratorAgent()
+
+    def process(self, filename: str, temp_path: str) -> GeneratedArtifacts:
+        file_type = self.parser_agent.detect_file_type(filename)
+        if not file_type:
+            raise ValueError("Unsupported file type")
+
+        raw_text = self.parser_agent.parse(file_type, temp_path)
+        structured_content = self.structuring_agent.structure(raw_text)
+        quiz_content = self.quiz_agent.generate(raw_text)
+
+        slide_path = self.slide_agent.generate(structured_content, quiz_content)
+        video_path = self.video_agent.generate(structured_content)
+
+        return GeneratedArtifacts(
+            structured_content=structured_content,
+            quiz_content=quiz_content,
+            slide_path=slide_path,
+            video_path=video_path,
+        )
+
+
+orchestrator = ContentGenerationOrchestrator()
+
+
 @app.post("/upload/")
 async def upload_file(file: UploadFile = File(...)):
-    file_type = detect_file_type(file.filename)
-
-    if not file_type:
-        return {"error": "Unsupported file type"}
-
     temp_path = f"temp_{file.filename}"
+    with open(temp_path, "wb") as temp_file:
+        temp_file.write(await file.read())
 
-    with open(temp_path, "wb") as f:
-        f.write(await file.read())
+    try:
+        artifacts = orchestrator.process(file.filename, temp_path)
+    except ValueError as error:
+        return {"error": str(error)}
 
-    # Parse
-    if file_type == "pdf":
-        text = parse_pdf(temp_path)
-    elif file_type == "docx":
-        text = parse_docx(temp_path)
-    elif file_type == "txt":
-        text = parse_txt(temp_path)
-    elif file_type == "pptx":
-        text = parse_pptx(temp_path)
-
-    # AI Processing
-    structured = structure_content(text)
-    quiz = generate_quiz(text)
-
-    # Create PPT
-    ppt_path = create_ppt(structured, quiz)
-
-    return {"message": "PPT created", "file": ppt_path}
+    return {
+        "message": "Content package created",
+        "slides_file": artifacts.slide_path,
+        "video_file": artifacts.video_path,
+    }
